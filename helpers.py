@@ -8,10 +8,10 @@ def find_allowable_combinations(tree, correct, assignments, x_counter=0):
 
 
     # A helper to union results (for alternatives) while threading the counter.
-    def union_results(results):
+    def union_results(pairs):
         union_list = []
         max_counter = x_counter  # starting counter
-        for res, cnt in results:
+        for res, cnt in pairs:
             union_list.extend(res)
             max_counter = max(max_counter, cnt)
         return union_list, max_counter
@@ -355,5 +355,85 @@ def run_derivation_for_row(row_idx, row, columns, current = None):
     #print(f"Options dict:\n  {current_options}")
 
     return current_options
+
+def evaluate_tree(tree, assignments):
+    """
+    Recursively evaluates a Boolean‐formula tree under the given assignments.
+    - tree: the Boolean formula expressed as a tree.
+    - assignments: a tuple (p, q, r, s) with Boolean values for the variables.
+    Returns 0 or 1.
+    """
+    p, q, r, s = assignments
+    op, *args = tree
+
+    if op == 'N':
+        assert len(args) == 1
+        return 1 - evaluate_tree(args[0], assignments)
+
+    elif op == 'A':
+        assert len(args) == 2
+        return evaluate_tree(args[0], assignments) & evaluate_tree(args[1], assignments)
+
+    elif op == 'O':
+        assert len(args) == 2
+        return evaluate_tree(args[0], assignments) | evaluate_tree(args[1], assignments)
+
+    elif op == 'C':       # A → B is ¬A ∨ B
+        assert len(args) == 2
+        left = evaluate_tree(args[0], assignments)
+        right = evaluate_tree(args[1], assignments)
+        return 0 if (left == 1 and right == 0) else 1
+
+    elif op == 'NC':  # A ↛ B
+        assert len(args) == 2
+        left = evaluate_tree(args[0], assignments)
+        right = evaluate_tree(args[1], assignments)
+        return 1 if (left == 1 and right == 0) else 0
+
+    elif op == 'B':     # A ↔ B
+        assert len(args) == 2
+        return 1 if evaluate_tree(args[0], assignments) == evaluate_tree(args[1], assignments) else 0
+
+    elif op == 'X':  # A ↮ B
+        assert len(args) == 2
+        return 1 if evaluate_tree(args[0], assignments) != evaluate_tree(args[1], assignments) else 0
+
+    elif op == 'NA':    # ¬(A ∧ B)
+        assert len(args) == 2
+        return 1 - (evaluate_tree(args[0], assignments) & evaluate_tree(args[1], assignments))
+
+    elif op == 'NOR':    # ¬(A ∨ B)
+        assert len(args) == 2
+        return 1 - (evaluate_tree(args[0], assignments) | evaluate_tree(args[1], assignments))
+
+    # variables
+    elif op == 'p':
+        return p
+    elif op == 'q':
+        return q
+    elif op == 'r':
+        return r
+    elif op == 's':
+        return s
+    
+def check_tree_matches(tree, target, assignments):
+    """
+    Returns True if evaluating `tree` under `assignments` yields `target`, else False.
+    - tree: partial Boolean‐formula tree.
+    - target: 0 or 1, the boolean you want to check against.
+    - assignments: tuple (p,q,r,s).
+    """
+    val = evaluate_tree(tree, assignments)
+    return bool(val == target)
+def percent_longer(found: str, minimal: str) -> float:
+    """
+    Returns how much longer `found` is than `minimal`, 
+    as a percentage of `minimal`’s length.
+    """
+    return (len(found) - len(minimal)) / len(minimal) * 100
+
+
+
+
 
 
