@@ -3,41 +3,44 @@
 def find_allowable_combinations(tree, correct, assignments, x_counter=0):
     p, q, r, s = assignments
     
+    # Quick lookup tables for values and truth tables
     value_map = {'p': p, 'q': q, 'r': r, 's': s}
     
     # Pre-computed truth tables for common operations
+    # Each entry is [outcome_when_correct_is_1, outcome_when_correct_is_0]
+    # Format: (left_value, right_value) -> valid combination
     truth_tables = {
-        'A': {  
-            1: [(1, 1)], 
-            0: [(0, 0), (0, 1), (1, 0)] 
+        'A': {  # AND
+            1: [(1, 1)],  # When correct=1, both sides must be 1
+            0: [(0, 0), (0, 1), (1, 0)]  # When correct=0, at least one side must be 0
         },
-        'O': {  
-            1: [(1, 1), (1, 0), (0, 1)], 
-            0: [(0, 0)]  
+        'O': {  # OR
+            1: [(1, 1), (1, 0), (0, 1)],  # When correct=1, at least one side must be 1
+            0: [(0, 0)]  # When correct=0, both sides must be 0
         },
-        'C': {  
-            1: [(0, 0), (0, 1), (1, 1)],  
-            0: [(1, 0)]  
+        'C': {  # Conditional (->)
+            1: [(0, 0), (0, 1), (1, 1)],  # When correct=1, either left is 0 or right is 1
+            0: [(1, 0)]  # When correct=0, left is 1 and right is 0
         },
-        'NC': {  
-            1: [(1, 0)],
-            0: [(0, 0), (0, 1), (1, 1)] 
+        'NC': {  # NOT Conditional
+            1: [(1, 0)],  # When correct=1, left is 1 and right is 0
+            0: [(0, 0), (0, 1), (1, 1)]  # When correct=0, either left is 0 or right is 1
         },
-        'B': { 
-            1: [(1, 1), (0, 0)], 
-            0: [(1, 0), (0, 1)]
+        'B': {  # Biconditional (<->)
+            1: [(1, 1), (0, 0)],  # When correct=1, both sides equal
+            0: [(1, 0), (0, 1)]  # When correct=0, sides differ
         },
-        'X': {  
-            1: [(1, 0), (0, 1)],
-            0: [(1, 1), (0, 0)]
+        'X': {  # XOR
+            1: [(1, 0), (0, 1)],  # When correct=1, sides differ
+            0: [(1, 1), (0, 0)]  # When correct=0, both sides equal
         },
-        'NA': {  
-            1: [(0, 0), (0, 1), (1, 0)],
-            0: [(1, 1)]
+        'NA': {  # NAND
+            1: [(0, 0), (0, 1), (1, 0)],  # When correct=1, at least one side must be 0
+            0: [(1, 1)]  # When correct=0, both sides must be 1
         },
-        'NOR': {
-            1: [(0, 0)], 
-            0: [(1, 1), (1, 0), (0, 1)] 
+        'NOR': {  # NOR
+            1: [(0, 0)],  # When correct=1, both sides must be 0
+            0: [(1, 1), (1, 0), (0, 1)]  # When correct=0, at least one side must be 1
         }
     }
 
