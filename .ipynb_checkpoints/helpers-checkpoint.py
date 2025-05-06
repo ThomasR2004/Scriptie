@@ -3,44 +3,41 @@
 def find_allowable_combinations(tree, correct, assignments, x_counter=0):
     p, q, r, s = assignments
     
-    # Quick lookup tables for values and truth tables
     value_map = {'p': p, 'q': q, 'r': r, 's': s}
     
     # Pre-computed truth tables for common operations
-    # Each entry is [outcome_when_correct_is_1, outcome_when_correct_is_0]
-    # Format: (left_value, right_value) -> valid combination
     truth_tables = {
-        'A': {  # AND
-            1: [(1, 1)],  # When correct=1, both sides must be 1
-            0: [(0, 0), (0, 1), (1, 0)]  # When correct=0, at least one side must be 0
+        'A': {  
+            1: [(1, 1)], 
+            0: [(0, 0), (0, 1), (1, 0)] 
         },
-        'O': {  # OR
-            1: [(1, 1), (1, 0), (0, 1)],  # When correct=1, at least one side must be 1
-            0: [(0, 0)]  # When correct=0, both sides must be 0
+        'O': {  
+            1: [(1, 1), (1, 0), (0, 1)], 
+            0: [(0, 0)]  
         },
-        'C': {  # Conditional (->)
-            1: [(0, 0), (0, 1), (1, 1)],  # When correct=1, either left is 0 or right is 1
-            0: [(1, 0)]  # When correct=0, left is 1 and right is 0
+        'C': {  
+            1: [(0, 0), (0, 1), (1, 1)],  
+            0: [(1, 0)]  
         },
-        'NC': {  # NOT Conditional
-            1: [(1, 0)],  # When correct=1, left is 1 and right is 0
-            0: [(0, 0), (0, 1), (1, 1)]  # When correct=0, either left is 0 or right is 1
+        'NC': {  
+            1: [(1, 0)],
+            0: [(0, 0), (0, 1), (1, 1)] 
         },
-        'B': {  # Biconditional (<->)
-            1: [(1, 1), (0, 0)],  # When correct=1, both sides equal
-            0: [(1, 0), (0, 1)]  # When correct=0, sides differ
+        'B': { 
+            1: [(1, 1), (0, 0)], 
+            0: [(1, 0), (0, 1)]
         },
-        'X': {  # XOR
-            1: [(1, 0), (0, 1)],  # When correct=1, sides differ
-            0: [(1, 1), (0, 0)]  # When correct=0, both sides equal
+        'X': {  
+            1: [(1, 0), (0, 1)],
+            0: [(1, 1), (0, 0)]
         },
-        'NA': {  # NAND
-            1: [(0, 0), (0, 1), (1, 0)],  # When correct=1, at least one side must be 0
-            0: [(1, 1)]  # When correct=0, both sides must be 1
+        'NA': {  
+            1: [(0, 0), (0, 1), (1, 0)],
+            0: [(1, 1)]
         },
-        'NOR': {  # NOR
-            1: [(0, 0)],  # When correct=1, both sides must be 0
-            0: [(1, 1), (1, 0), (0, 1)]  # When correct=0, at least one side must be 1
+        'NOR': {
+            1: [(0, 0)], 
+            0: [(1, 1), (1, 0), (0, 1)] 
         }
     }
 
@@ -231,62 +228,85 @@ def run_derivation_for_row(row_idx, row, columns, current = None):
 def evaluate_tree(tree, assignments):
     """
     Recursively evaluates a Boolean‐formula tree under the given assignments.
-    - tree: the Boolean formula expressed as a tree.
-    - assignments: a tuple (p, q, r, s) with Boolean values for the variables.
-    Returns 0 or 1.
+    Supports:
+      - tuple nodes with ops: 'N','A','O','C','NC','B','X','NA','NOR'
+      - variable leaves: 'p','q','r','s'
+      - constant leaves: 'a' (True), 'b' (False)
+    Always returns 0 or 1, or raises ValueError on malformed input.
     """
-    p, q, r, s = assignments
+    # Debugging: Print tree and assignments at each call
+    #print(f"Evaluating tree: {tree} with assignments: {assignments}")
+
+    # 1) Constant leaf (a = True, b = False)
+    if isinstance(tree, (int, bool)):
+        return int(tree)  # Directly return 1 or 0
+    if isinstance(tree, str):
+        if tree == 'a':
+            return 1
+        if tree == 'b':
+            return 0
+        if tree == 'p':
+            return assignments[0]
+        if tree == 'q':
+            return assignments[1]
+        if tree == 'r':
+            return assignments[2]
+        if tree == 's':
+            return assignments[3]
+        raise ValueError(f"Unknown leaf: {tree!r}")
+
+    # 2) The tree must be a tuple for operators
+    if not isinstance(tree, tuple):
+        raise ValueError(f"Invalid tree node: {tree!r}")
+
     op, *args = tree
 
+    # 3) Operators: Check each operation type
     if op == 'N':
         assert len(args) == 1
         return 1 - evaluate_tree(args[0], assignments)
 
-    elif op == 'A':
+    if op == 'A':
         assert len(args) == 2
         return evaluate_tree(args[0], assignments) & evaluate_tree(args[1], assignments)
 
-    elif op == 'O':
+    if op == 'O':
         assert len(args) == 2
         return evaluate_tree(args[0], assignments) | evaluate_tree(args[1], assignments)
 
-    elif op == 'C':       # A → B is ¬A ∨ B
+    if op == 'C':  # A → B is ¬A ∨ B
         assert len(args) == 2
         left = evaluate_tree(args[0], assignments)
         right = evaluate_tree(args[1], assignments)
         return 0 if (left == 1 and right == 0) else 1
 
-    elif op == 'NC':  # A ↛ B
+    if op == 'NC':  # A ↛ B
         assert len(args) == 2
         left = evaluate_tree(args[0], assignments)
         right = evaluate_tree(args[1], assignments)
         return 1 if (left == 1 and right == 0) else 0
 
-    elif op == 'B':     # A ↔ B
+    if op == 'B':  # A ↔ B
         assert len(args) == 2
-        return 1 if evaluate_tree(args[0], assignments) == evaluate_tree(args[1], assignments) else 0
+        return int(evaluate_tree(args[0], assignments) == evaluate_tree(args[1], assignments))
 
-    elif op == 'X':  # A ↮ B
+    if op == 'X':  # A ↮ B
         assert len(args) == 2
-        return 1 if evaluate_tree(args[0], assignments) != evaluate_tree(args[1], assignments) else 0
+        return int(evaluate_tree(args[0], assignments) != evaluate_tree(args[1], assignments))
 
-    elif op == 'NA':    # ¬(A ∧ B)
+    if op == 'NA':  # ¬(A ∧ B)
         assert len(args) == 2
         return 1 - (evaluate_tree(args[0], assignments) & evaluate_tree(args[1], assignments))
 
-    elif op == 'NOR':    # ¬(A ∨ B)
+    if op == 'NOR':  # ¬(A ∨ B)
         assert len(args) == 2
         return 1 - (evaluate_tree(args[0], assignments) | evaluate_tree(args[1], assignments))
 
-    # variables
-    elif op == 'p':
-        return p
-    elif op == 'q':
-        return q
-    elif op == 'r':
-        return r
-    elif op == 's':
-        return s
+    # 4) Invalid operator or malformed node
+    raise ValueError(f"Unknown operator or malformed node: {op!r}")
+
+
+    
     
 def check_tree_matches(tree, target, assignments):
     """
