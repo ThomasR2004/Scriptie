@@ -9,6 +9,11 @@ import numpy as np
 import time
 from functools import lru_cache
 from collections import defaultdict
+device = torch.device("cuda")
+print(f"Using device: {device}")
+from helpers import (round_prediction, binary_to_bitlist, 
+                     tree_to_formula, run_derivation_for_row, 
+                     check_tree_matches, percent_longer)
 
 conn = sqlite3.connect("db_numprop-4_nestlim-100.db")
 cursor = conn.cursor()
@@ -18,28 +23,39 @@ all_rows = cursor.fetchall()
 column_names = [desc[0] for desc in cursor.description]
 formula_idx = column_names.index("formula")
 category_idx = column_names.index("category")
+import sys
+sys.setrecursionlimit(10000)
+
+
 
 # ---------- Tree Node Definition with Hashing ----------
 class TreeNode:
-    __slots__ = ('op', 'left', 'right')
     def __init__(self, op, left=None, right=None):
         self.op = op
         self.left = left
         self.right = right
-    def __repr__(self):
-        if self.op in ('p','q','r','s','Z'):
-            return self.op
-        if self.op=='N':
-            return f"(N {self.left})"
-        return f"({self.op} {self.left} {self.right})"
+        # Precompute hash if tree structure is immutable after creation
+        self._hash = None
+
     def __eq__(self, other):
-        return isinstance(other, TreeNode) and (self.op,self.left,self.right)==(other.op,other.left,other.right)
+        if not isinstance(other, TreeNode):
+            return NotImplemented
+        return self.op == other.op and self.left == other.left and self.right == other.right
+
     def __hash__(self):
-        return hash((self.op,self.left,self.right))
+        if self._hash is None: # Compute and cache hash if not already done
+            # Ensure children are also hashable (None is fine)
+            self._hash = hash((self.op, self.left, self.right))
+        return self._hash
+    def __repr__(self):
+        if self.left is None and self.right is None:
+            return f"TreeNode({self.op!r})"
+        return f"TreeNode({self.op!r}, left={self.left!r}, right={self.right!r})"
 
 # ---------- Conversion Helper ----------
 # Cache frequently converted trees
 TREENODE_CACHE = {}
+@profile
 def tuple_to_treenode(tree):
     # Add caching to reduce conversion time
     if isinstance(tree, TreeNode): 
@@ -99,6 +115,7 @@ TRUTH_TABLES = {
 }
 
 # Optimize the combine function which is a major bottleneck
+@profile
 def combine(l1, l2):
     if not l1 or not l2: 
         return []
@@ -119,8 +136,8 @@ def combine(l1, l2):
                 m.update(d2)
                 res.append(m)
     return res
-
 @lru_cache(maxsize=None)
+@profile
 def _find_combinations(node, correct, assignments, x_counter):
     p, q, r, s = assignments
     vm = {'p': p, 'q': q, 'r': r, 's': s}
@@ -131,8 +148,7 @@ def _find_combinations(node, correct, assignments, x_counter):
     if op in vm:
         return ([{}] if vm[op] == correct else []), x_counter
     if op == 'Z':
-        name = f"Z_{x_counter}"
-        return ([{name: correct}]), x_counter + 1
+        return ([{x_counter: correct}]), x_counter + 1 # New, x_counter is an int
     if op == 'N':
         return _find_combinations(node.left, 1 - correct, assignments, x_counter)
     
@@ -170,31 +186,27 @@ def find_allowable_combinations(tree, correct, assignments, x_counter=0):
     node = tuple_to_treenode(tree)
     return _find_combinations(node, correct, tuple(assignments), x_counter)
 
-device = torch.device("cuda")
-print(f"Using device: {device}")
-from helpers import (round_prediction, binary_to_bitlist, 
-                     tree_to_formula, run_derivation_for_row, 
-                     check_tree_matches, percent_longer)
+
+
+class Net(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(Net, self).__init__()
+        self.ln1 = nn.Linear(input_size, 16)
+        self.ln2 = nn.Linear(16, 16)
+        self.ln3 = nn.Linear(16, output_size)
+
+    def forward(self, x):
+        x = 2 * x - 1
+        x = F.relu(self.ln1(x))
+        x = F.relu(self.ln2(x))
+        x = self.ln3(x)
+        return torch.sigmoid(x)
 
 def init_weights(m):
     if isinstance(m, nn.Linear):
         nn.init.xavier_uniform_(m.weight)
         if m.bias is not None:
             nn.init.zeros_(m.bias)
-
-# Optimized network - reduced size for faster training
-class Net(nn.Module):
-    def __init__(self, input_size, output_size):
-        super(Net, self).__init__()
-        # Simplified architecture
-        self.ln1 = nn.Linear(input_size, 12)  # Reduced from 16
-        self.ln2 = nn.Linear(12, output_size)  # Removed third layer
-
-    def forward(self, x):
-        x = 2 * x - 1
-        x = F.relu(self.ln1(x))
-        x = self.ln2(x)
-        return torch.sigmoid(x)
 
 MODEL_CACHE = {}
 def get_model(input_size, output_size):
@@ -204,210 +216,215 @@ def get_model(input_size, output_size):
     model = MODEL_CACHE[output_size]
     model.apply(init_weights)  
     return model
-
 @profile
 def compute_target(correct, input_row, nn_first_prediction, tree_candidate):
     """
     Returns (best_target_tensor, non_terminal_count) or (None, 0).
     Caches the candidate list + count so we don't recompute it every call.
+    Uses sparse-to-dense vectorization to speed up distance computations.
     """
     assignments = tuple(input_row)
-    
-    # Create a hashable key for the cache - use tuple representation of tree instead of id
-    # This is more reliable if trees are recreated but structurally identical
-    key = (tuple(str(tree_candidate).encode()), correct, assignments)
-    
-    # fetch or compute the list of fillings + count
-    if key not in COMBINATION_CACHE:
+    key = (tree_candidate, correct, assignments)
+
+    try:
+        candidate_list, non_term_count = COMBINATION_CACHE[key]
+    except KeyError:
         candidate_list, non_term_count = find_allowable_combinations(
             tree_candidate, correct, assignments
         )
         COMBINATION_CACHE[key] = (candidate_list, non_term_count)
-    else:
-        candidate_list, non_term_count = COMBINATION_CACHE[key]
-    
-    # Early return if no valid candidates or non-terminals
+
     if not candidate_list or non_term_count == 0:
         return None, 0
-    
-    # Optimize tensor creation for large candidate lists
-    if len(candidate_list) > 1000:
-        # Process in batches to reduce memory pressure
-        batch_size = 1000
-        min_dist = float('inf')
-        best_vector = None
-        
-        for i in range(0, len(candidate_list), batch_size):
-            batch = candidate_list[i:i+batch_size]
-            
-            # Create tensor in one operation for efficiency
-            batch_data = torch.zeros((len(batch), non_term_count), dtype=torch.float, device=device)
-            
-            # OPTIMIZED: Use vectorized operations instead of nested loops
-            # Pre-process the batch to build coordinate format for sparse tensor
-            indices_j = []
-            indices_idx = []
-            values = []
-            
-            for j, cand in enumerate(batch):
-                for var_id, val in cand.items():
-                    if var_id.startswith("Z_"):
-                        idx = int(var_id[2:])
-                        if idx < non_term_count:
-                            indices_j.append(j)
-                            indices_idx.append(idx)
-                            values.append(val)
-            
-            # Use vectorized indexing to set all values at once
-            if values:  # Only if we have values to set
-                batch_data[indices_j, indices_idx] = torch.tensor(values, dtype=torch.float, device=device)
-            
-            # Calculate distances in one operation
-            pred = nn_first_prediction.view(1, -1).to(device)
-            batch_dists = torch.norm(batch_data - pred, dim=1)
-            
-            # Update best if found
-            batch_min_idx = torch.argmin(batch_dists).item()
-            batch_min_dist = batch_dists[batch_min_idx].item()
-            
-            if batch_min_dist < min_dist:
-                min_dist = batch_min_dist
-                best_vector = batch_data[batch_min_idx]
-        
-        return best_vector, non_term_count
-    
+
+    # Prepare prediction tensor [1, D]
+    pred = nn_first_prediction.view(1, -1).to(device)
+    N = len(candidate_list)
+    D = non_term_count
+
+    # Sanity check prediction length matches non_term_count
+    if pred.size(1) != D:
+        # If mismatch, pad or truncate prediction
+        if pred.size(1) < D:
+            pad = torch.zeros((1, D - pred.size(1)), device=device)
+            pred = torch.cat([pred, pad], dim=1)
+        else:
+            pred = pred[:, :D]
+
+    # Collect sparse indices and values for all candidates
+    rows, cols, vals = [], [], []
+    for i, cand in enumerate(candidate_list):
+        for var_key, val in cand.items(): # var_key could be 'p', 'q', or an int
+            if isinstance(var_key, int): # Check if it's one of our Z variables (now an int)
+                idx = var_key
+                # No need for startswith, slicing, or int(var_id[2:])
+                if 0 <= idx < D:
+                    rows.append(i)
+                    cols.append(idx)
+                    vals.append(val)
+
+    # Build sparse tensor and convert to dense [N, D]
+    if vals:
+        indices = torch.tensor([rows, cols], dtype=torch.long, device=device)
+        values = torch.tensor(vals, dtype=torch.float, device=device)
+        sparse = torch.sparse_coo_tensor(indices, values, (N, D), device=device)
+        vectors = sparse.to_dense()
     else:
-        # For smaller lists, use a more efficient approach
-        # Create list of dictionaries first
-        vector_values = []
-        for cand in candidate_list:
-            # Extract only the values that match the pattern and are in range
-            vec_dict = {int(k[2:]): v for k, v in cand.items() 
-                       if k.startswith("Z_") and int(k[2:]) < non_term_count}
-            vector_values.append(vec_dict)
-        
-        # Create tensor all at once
-        vectors = torch.zeros((len(candidate_list), non_term_count), dtype=torch.float, device=device)
-        
-        # Populate tensor using vectorized operations where possible
-        for i, vec_dict in enumerate(vector_values):
-            if vec_dict:  # Only if we have values to set
-                indices = list(vec_dict.keys())
-                values = list(vec_dict.values())
-                indices_tensor = torch.tensor(indices, dtype=torch.long, device=device)
-                values_tensor = torch.tensor(values, dtype=torch.float, device=device)
-                vectors[i].index_copy_(0, indices_tensor, values_tensor)
-        
-        # Pick the one closest to the network's prediction
-        pred = nn_first_prediction.view(1, -1).to(device)  # [1, non_term_count]
-        dists = torch.norm(vectors - pred, dim=1)          # [#candidates]
-        best = torch.argmin(dists).item()
-        
-        return vectors[best], non_term_count
+        vectors = torch.zeros((N, D), dtype=torch.float, device=device)
+
+    # Compute L2 distances in one vectorized op
+    dists = torch.norm(vectors - pred, dim=1)
+
+    # Select best candidate
+    best_idx = torch.argmin(dists).item()
+    best_vec = vectors[best_idx]
+
+    # Final sanity check: ensure best_vec length matches D
+    if best_vec.numel() != D:
+        # fallback to zero vector to avoid length mismatch
+        return torch.zeros(D, device=device), D
+
+    return best_vec, D
+
+
 
 @profile
-def train_on_truth_table(nn_model, truth_table, bitlist, tree_candidate, 
-                           max_epochs=1000, lr=0.01, patience=10):
+def train_on_truth_table(truth_table, bitlist, tree_candidate,
+                         max_epochs=1000, lr=0.01, patience=10):
     """
-    Trains nn_model on the entire truth_table as a single batch.
-    Returns:
-      - int  : epochs to converge
-      - None : if some row is unsolvable
-      - inf  : if it doesn't converge within max_epochs
+    Trains a fresh Net(input_size, global_D) on the entire truth_table.
+    global_D is the maximum non-terminal count over all rows.
+    Returns epochs to converge, None if unsolvable, or inf if no convergence.
     """
-    # Switch to a faster optimizer with better parameters
-    optimizer = torch.optim.AdamW(nn_model.parameters(), lr=lr, weight_decay=1e-4)
-    
-    # Use learning rate scheduler to speed up convergence
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=False
-    )
-    
-    # Convert data once and ensure it's on the right device
+
     X = torch.from_numpy(truth_table.astype(np.float32)).to(device)
-    N = X.size(0)
-    
-    # Pre-compute all targets up front to avoid repeated computation
-    targets = []
-    output_size = None
-    
-    # Use a single forward pass to get all predictions
+    N, input_size = X.size()
+
+    # 1) Pre-scan to find each row's Dᵢ (use dummy pred of length 0)
+    dummy_pred = torch.zeros(0, device=device)
+    Ds = []
+    for i in range(N):
+        _, Di = compute_target(bitlist[i], tuple(truth_table[i]), dummy_pred, tree_candidate)
+        if Di is None:
+            return None # Unsolvable
+        Ds.append(Di)
+
+    if not Ds:
+        return 0
+
+    global_D = max(Ds) if Ds else 0
+    if global_D == 0:
+        return 0
+
+    # 2) (Re)build the model with the correct output size
+    # --- FIX APPLIED HERE ---
+    # Directly instantiate the Net class
+    model = Net(input_size, global_D).to(device)
+    # -----------------------
+    model.apply(init_weights)
+
+    # 3) Prepare optimizer + scheduler
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4, amsgrad=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.3, patience=3, verbose=False, min_lr=1e-5
+    )
+
+    # 4) Compute initial_preds (used for warm-start in target distance)
     with torch.no_grad():
-        initial_preds = nn_model(X)
-        
-        for i in range(N):
-            pred = initial_preds[i]
-            tgt, nt_count = compute_target(
-                bitlist[i], tuple(truth_table[i]), pred, tree_candidate
-            )
-            
-            if tgt is None:
-                return None  # unsolvable
-                
-            # Set output_size once
-            if output_size is None:
-                output_size = nt_count
-                
-            # Enforce consistency
-            if tgt.numel() != output_size:
-                raise ValueError(
-                    f"Row {i} target length {tgt.numel()} != expected {output_size}"
-                )
-                
-            targets.append(tgt)
-    
-    # Stack into single tensor
-    Y = torch.stack(targets)
-    
-    # Cache rounded Y for faster comparisons
+        initial_preds = model(X) # Shape (N, global_D)
+
+    # 5) Build padded target matrix Y (Optimized: Pre-allocate and fill)
+    Y = torch.zeros(N, global_D, device=device)
+    valid_indices_for_Y = [] # Keep track in case we need filtering later
+
+    for i in range(N):
+        pred_i = initial_preds[i] # Shape (global_D)
+        tgt_i, _ = compute_target(bitlist[i], tuple(truth_table[i]), pred_i, tree_candidate)
+
+        if tgt_i is None:
+            return None # Unsolvable if any target cannot be computed
+
+        numel = tgt_i.numel()
+        if numel == 0 and global_D > 0:
+             pass
+        elif numel < global_D:
+            Y[i, :numel] = tgt_i
+        elif numel > global_D:
+            Y[i, :] = tgt_i[:global_D]
+        else: # numel == global_D
+            Y[i, :] = tgt_i
+        valid_indices_for_Y.append(i) # Track valid rows
+
+    # Ensure we actually have data (especially if filtering were added)
+    if len(valid_indices_for_Y) == 0 :
+        return 0 # Or handle appropriately
+
+    # Note: If you ever implement filtering for None targets, you'd need:
+    # if len(valid_indices_for_Y) < N:
+    #     X = X[valid_indices_for_Y]
+    #     Y = Y[valid_indices_for_Y]
+    #     N = X.shape[0] # Update N
+
     rounded_Y = round_prediction(Y)
-    
-    # Training loop with improved early stopping
+
+    # 6) Standard training loop
     best_loss = float('inf')
-    patience_counter = 0
-    
+    patience_ctr = 0
+    check_every = 5
+    loss_thresh = 1e-5
+
     for epoch in range(1, max_epochs + 1):
-        # Standard forward pass (autocast not safe with binary_cross_entropy)
-        P = nn_model(X)
+        model.train() # Ensure model is in training mode
+        P = model(X) # Predictions, Shape (N, global_D)
         loss = F.binary_cross_entropy(P, Y)
-        
-        # Early stopping check - only do rounding when necessary
-        # and use cached tensors where possible
-        if epoch % 5 == 0 or loss < 0.001:  # Only check periodically or when loss is very low
-            rounded_P = round_prediction(P)
-            if torch.equal(rounded_P, rounded_Y):
-                return epoch
-        
-        # More efficient gradient reset
+
+        rounded_P_current_epoch = None
+        check_condition = (epoch % check_every == 0) or (loss.item() < 0.001) # Check loss value, not tensor
+
+        if check_condition:
+            model.eval() # Set to eval mode for prediction rounding consistency
+            with torch.no_grad():
+                rounded_P_current_epoch = round_prediction(P)
+            model.train() # Set back to train mode
+            if torch.equal(rounded_P_current_epoch, rounded_Y):
+                return epoch # Converged
+
         optimizer.zero_grad(set_to_none=True)
-        
-        # Standard backward and optimization
         loss.backward()
         optimizer.step()
-        
-        # Update learning rate based on loss
-        scheduler.step(loss.item())
-        
-        # Implement better early stopping
-        if loss < best_loss:
-            best_loss = loss
-            patience_counter = 0
+
+        if epoch % 2 == 0:
+            scheduler.step(loss.item())
+
+        current_loss_val = loss.item()
+        if current_loss_val < best_loss:
+            best_loss = current_loss_val
+            patience_ctr = 0
         else:
-            patience_counter += 1
-            
-        if patience_counter >= patience and epoch > 50:
-            # Check if we've actually converged before stopping
-            rounded_P = round_prediction(P)
-            if torch.equal(rounded_P, rounded_Y):
-                return epoch
-                
-        # Fast exit on very low loss
-        if loss < 1e-5:
-            rounded_P = round_prediction(P)
-            if torch.equal(rounded_P, rounded_Y):
-                return epoch
-    
-    return float('inf')
+            patience_ctr += 1
+
+        if patience_ctr >= patience and epoch > 50:
+            # Check one last time before early stopping
+            if rounded_P_current_epoch is None:
+                model.eval()
+                with torch.no_grad():
+                    rounded_P_current_epoch = round_prediction(P)
+                model.train()
+            if torch.equal(rounded_P_current_epoch, rounded_Y):
+                 return epoch
+            return float('inf') # Did not converge within patience
+
+        if current_loss_val < loss_thresh:
+            if rounded_P_current_epoch is None:
+                model.eval()
+                with torch.no_grad():
+                     rounded_P_current_epoch = round_prediction(P)
+                model.train()
+            if torch.equal(rounded_P_current_epoch, rounded_Y):
+                 return epoch # Converged
+
+    return float('inf') # Max epochs reached without convergence
+
 @profile
 def evaluate_candidate_options(current_options, truth_table, final_formula, bitlist):
     candidate_iterations = {}
@@ -450,7 +467,7 @@ def evaluate_candidate_options(current_options, truth_table, final_formula, bitl
             
         # Train model with optimized function
         nn_model = get_model(truth_table.shape[1], non_terminal_count)
-        iters = train_on_truth_table(nn_model, truth_table, bitlist, tree_cand)
+        iters = train_on_truth_table(truth_table, bitlist, tree_cand)
         
         if iters is None or iters == float('inf'):
             continue
@@ -477,7 +494,7 @@ if __name__ == "__main__":
     found_formulas = []
 
     # Sample fewer rows for faster execution during optimization 
-    row_indices = random.sample(range(len(all_rows)), 3)
+    row_indices = random.sample(range(len(all_rows)), 20)
     print(f"Testing with {len(row_indices)} random rows")
     
     for row_index in row_indices:
@@ -485,11 +502,14 @@ if __name__ == "__main__":
         row = all_rows[row_index]
         final_formula = row[formula_idx]
         bitlist = binary_to_bitlist(row[category_idx], len(truth_table))
+        first_correct = bitlist[0]
+        first_assign = tuple(truth_table[0])
+
 
         current = None
         found = False    
         
-        for depth in range(50):  # Reduced from 50 to 10 for faster execution
+        for depth in range(100):
             print(f"  Depth {depth}")
             current_options = run_derivation_for_row(row_index, row, column_names, current)
             result = evaluate_candidate_options(current_options, truth_table, final_formula, bitlist)
@@ -510,10 +530,34 @@ if __name__ == "__main__":
                 found_formulas.append((row_index, found_formula, pct))
                 print(f"  Found formula: {found_formula}  ({pct:.1f}% longer)")
                 break
+             # Case B: we have a dict of {option_index: iterations}
             elif result:
-                best_key = min(result, key=result.get)
-                current = current_options[best_key]
-                print(f"  Best candidate: {tree_to_formula(current)} (iterations: {result[best_key]})")
+                # sort candidates by fewest NN-iterations first
+                sorted_candidates = sorted(result.items(), key=lambda kv: kv[1])
+
+                picked = False
+                for opt_idx, iters in sorted_candidates:
+                    cand_tree = current_options[opt_idx]
+
+                    #check viability before accepting it
+                    combs, _ = find_allowable_combinations(
+                        cand_tree,
+                        first_correct,                 
+                        first_assign,      
+                        x_counter=0                         
+                    )
+                    if combs:
+                        # this candidate can actually instantiate for this row
+                        current = cand_tree
+                        print(f"  Best viable candidate: {tree_to_formula(current)} (iterations: {iters})")
+                        picked = True
+                        break
+
+                if not picked:
+                    print("  No *viable* candidates found at this depth—bailing out")
+                    break
+
+            # Case C: no candidates at all
             else:
                 print("  No viable candidates found")
                 break
