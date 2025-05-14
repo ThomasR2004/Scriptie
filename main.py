@@ -113,7 +113,6 @@ TRUTH_TABLES = {
     }
 }
 
-# Optimize the combine function which is a major bottleneck
 @profile
 def combine(l1, l2):
     """Efficiently merge two lists of partial assignments, filtering incompatibilities."""
