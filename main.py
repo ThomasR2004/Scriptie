@@ -28,7 +28,7 @@ sys.setrecursionlimit(10000)
 
 
 
-# ---------- Tree Node Definition with Hashing ----------
+
 class TreeNode:
     def __init__(self, op, left=None, right=None):
         self.op = op
@@ -52,7 +52,6 @@ class TreeNode:
             return f"TreeNode({self.op!r})"
         return f"TreeNode({self.op!r}, left={self.left!r}, right={self.right!r})"
 
-# ---------- Conversion Helper ----------
 # Cache frequently converted trees
 TREENODE_CACHE = {}
 @profile
@@ -117,24 +116,27 @@ TRUTH_TABLES = {
 # Optimize the combine function which is a major bottleneck
 @profile
 def combine(l1, l2):
-    if not l1 or not l2: 
+    """Efficiently merge two lists of partial assignments, filtering incompatibilities."""
+    if not l1 or not l2:
         return []
-    
+    # Ensure we iterate the smallest list in the inner loop
+    if len(l1) < len(l2):
+        shorter, longer = l1, l2
+        swap = False
+    else:
+        shorter, longer = l2, l1
+        swap = True
     res = []
-    for d1 in l1:
-        for d2 in l2:
-            # Fast incompatibility check
-            compatible = True
-            for k, v in d2.items():
-                if k in d1 and d1[k] != v:
-                    compatible = False
-                    break
-            
-            if compatible:
-                # Create new dict only when needed
-                m = d1.copy()
-                m.update(d2)
-                res.append(m)
+    for d_small in shorter:
+        for d_large in longer:
+            # Determine which is d1 and d2 based on swap
+            d1, d2 = (d_large, d_small) if swap else (d_small, d_large)
+            # Fast compatibility check via all()
+            if all(d1.get(k, v) == v for k, v in d2.items()):
+                # Merge dicts
+                merged = d1.copy()
+                merged.update(d2)
+                res.append(merged)
     return res
 @lru_cache(maxsize=None)
 @profile
@@ -288,6 +290,8 @@ def compute_target(correct, input_row, nn_first_prediction, tree_candidate):
 
 
 
+
+
 @profile
 def train_on_truth_table(truth_table, bitlist, tree_candidate,
                          max_epochs=1000, lr=0.01, patience=10):
@@ -300,7 +304,7 @@ def train_on_truth_table(truth_table, bitlist, tree_candidate,
     X = torch.from_numpy(truth_table.astype(np.float32)).to(device)
     N, input_size = X.size()
 
-    # 1) Pre-scan to find each row's Dᵢ (use dummy pred of length 0)
+    # Pre-scan to find each row's D
     dummy_pred = torch.zeros(0, device=device)
     Ds = []
     for i in range(N):
@@ -316,26 +320,22 @@ def train_on_truth_table(truth_table, bitlist, tree_candidate,
     if global_D == 0:
         return 0
 
-    # 2) (Re)build the model with the correct output size
-    # --- FIX APPLIED HERE ---
-    # Directly instantiate the Net class
+
     model = Net(input_size, global_D).to(device)
-    # -----------------------
     model.apply(init_weights)
 
-    # 3) Prepare optimizer + scheduler
+    # Prepare optimizer + scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4, amsgrad=True)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.3, patience=3, verbose=False, min_lr=1e-5
     )
 
-    # 4) Compute initial_preds (used for warm-start in target distance)
+    # Compute initial_preds 
     with torch.no_grad():
         initial_preds = model(X) # Shape (N, global_D)
 
-    # 5) Build padded target matrix Y (Optimized: Pre-allocate and fill)
+    # Build padded target matrix Y 
     Y = torch.zeros(N, global_D, device=device)
-    valid_indices_for_Y = [] # Keep track in case we need filtering later
 
     for i in range(N):
         pred_i = initial_preds[i] # Shape (global_D)
@@ -345,25 +345,6 @@ def train_on_truth_table(truth_table, bitlist, tree_candidate,
             return None # Unsolvable if any target cannot be computed
 
         numel = tgt_i.numel()
-        if numel == 0 and global_D > 0:
-             pass
-        elif numel < global_D:
-            Y[i, :numel] = tgt_i
-        elif numel > global_D:
-            Y[i, :] = tgt_i[:global_D]
-        else: # numel == global_D
-            Y[i, :] = tgt_i
-        valid_indices_for_Y.append(i) # Track valid rows
-
-    # Ensure we actually have data (especially if filtering were added)
-    if len(valid_indices_for_Y) == 0 :
-        return 0 # Or handle appropriately
-
-    # Note: If you ever implement filtering for None targets, you'd need:
-    # if len(valid_indices_for_Y) < N:
-    #     X = X[valid_indices_for_Y]
-    #     Y = Y[valid_indices_for_Y]
-    #     N = X.shape[0] # Update N
 
     rounded_Y = round_prediction(Y)
 
@@ -497,7 +478,7 @@ if __name__ == "__main__":
     row_indices = random.sample(range(len(all_rows)), 20)
     print(f"Testing with {len(row_indices)} random rows")
     
-    for row_index in row_indices:
+    for row_index in range(100):
         print(f"Processing row {row_index}...")
         row = all_rows[row_index]
         final_formula = row[formula_idx]
