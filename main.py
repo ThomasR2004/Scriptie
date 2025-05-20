@@ -454,7 +454,6 @@ if __name__ == "__main__":
     unfound_rows = []
     start_time = time.time()
     
-    # Pre-compute truth table once
     truth_table = np.array([
         [1, 1, 1, 1], [1, 1, 1, 0], [1, 1, 0, 1], [1, 1, 0, 0],
         [1, 0, 1, 1], [1, 0, 1, 0], [1, 0, 0, 1], [1, 0, 0, 0],
