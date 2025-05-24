@@ -1,4 +1,4 @@
-
+import torch
 
 def find_allowable_combinations(tree, correct, assignments, x_counter=0):
     p, q, r, s = assignments
@@ -41,28 +41,6 @@ def find_allowable_combinations(tree, correct, assignments, x_counter=0):
         }
     }
 
-    # Optimized combine function that avoids unnecessary dict creation
-    def combine(list1, list2):
-        if not list1 or not list2:  # Early return for empty lists
-            return []
-            
-        result = []
-        for d1 in list1:
-            for d2 in list2:
-                # Check for conflicts before copying
-                conflict = False
-                for key, value in d2.items():
-                    if key in d1 and d1[key] != value:
-                        conflict = True
-                        break
-                        
-                if not conflict:
-                    # Only create new dict when needed
-                    merged = dict(d1)
-                    for key, value in d2.items():
-                        merged[key] = value
-                    result.append(merged)
-        return result
 
     # Extract operator and arguments
     f, *args = tree
@@ -114,8 +92,8 @@ def find_allowable_combinations(tree, correct, assignments, x_counter=0):
  
 
 
-def round_prediction(pred, threshold=0.5):
-    return (pred > threshold).float()
+def round_prediction(tensor):
+    return (tensor >= 0.5).to(torch.float)
 
 
 def binary_to_bitlist(n, total):
@@ -162,36 +140,51 @@ def extract_grammar_from_data_row(row, columns):
 
 
 
-def expand_all_X(expr, grammar):
+def count_non_terminals(expr):
+    """Recursively count the number of non-terminal symbols ('Z') in the expression."""
+    if expr == "Z":
+        return 1
+    elif isinstance(expr, tuple):
+        return sum(count_non_terminals(sub) for sub in expr)
+    return 0
+
+def expand_all_X(expr, grammar, max_non_terminals=8):
     """
-    Recursively finds the leftmost 'X' in a nested tuple structure and replaces it
-    with each possible grammar rule or terminal symbol.
+    Recursively finds the leftmost 'Z' in a nested tuple structure and replaces it
+    with each possible grammar rule or terminal symbol. Grammar rules are only
+    applied if the resulting expression doesn't exceed the non-terminal threshold.
     """
     if expr == "Z":
-        # Base case: single 'X' to replace
         expansions = []
-        
+
+        # Always allow terminal replacements
         for terminal in ["p", "q", "r", "s"]:
             expansions.append(terminal)
 
+        # Try rule-based replacements, but only keep them if they don't exceed the limit
         for rule in grammar.values():
-            expansions.append(rule("Z"))
+            new_expr = rule("Z")
+            total_Zs = count_non_terminals(new_expr)
+            if total_Zs <= max_non_terminals:
+                expansions.append(new_expr)
 
         return expansions
 
     elif isinstance(expr, tuple):
-        # Recursive case: traverse the structure to find the leftmost 'X'
         for i, sub in enumerate(expr):
-            sub_expansions = expand_all_X(sub, grammar)
+            sub_expansions = expand_all_X(sub, grammar, max_non_terminals)
             if sub_expansions:
-                # Replace the first expandable part and break
                 results = []
                 for new_sub in sub_expansions:
                     new_expr = list(expr)
                     new_expr[i] = new_sub
-                    results.append(tuple(new_expr))
+                    combined = tuple(new_expr)
+                    if count_non_terminals(combined) <= max_non_terminals:
+                        results.append(combined)
                 return results
+
     return []
+
 
 
 def run_derivation_for_row(row_idx, row, columns, current = None):

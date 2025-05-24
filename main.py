@@ -14,8 +14,10 @@ print(f"Using device: {device}")
 from helpers import (round_prediction, binary_to_bitlist, 
                      tree_to_formula, run_derivation_for_row, 
                      check_tree_matches, percent_longer)
+from combine_fast import combine_cython, combine_cython_ultra
 
-conn = sqlite3.connect("db_sampled_10percent_stratified2.db")
+# Use like your original function
+conn = sqlite3.connect("sample.db")
 cursor = conn.cursor()
 
 cursor.execute("SELECT * FROM data")
@@ -113,40 +115,7 @@ TRUTH_TABLES = {
     }
 }
 
-@profile
-def combine(l1, l2):
-    """Safely merge two lists of partial assignment dicts, filtering incompatible combinations."""
-    if not l1 or not l2:
-        return []
 
-    # Ensure smaller list is inner loop
-    if len(l1) < len(l2):
-        shorter, longer = l1, l2
-        swap = False
-    else:
-        shorter, longer = l2, l1
-        swap = True
-
-    res = []
-    for d_small in shorter:
-        if not isinstance(d_small, dict):
-            continue
-        for d_large in longer:
-            if not isinstance(d_large, dict):
-                continue
-            d1, d2 = (d_large, d_small) if swap else (d_small, d_large)
-            try:
-                if all(d1.get(k, v) == v for k, v in d2.items()):
-                    merged = d1.copy()
-                    merged.update(d2)
-                    res.append(merged)
-            except Exception as e:
-                # Gracefully skip bad merges
-                continue
-    return res
-
-
-@lru_cache(maxsize=20000)
 @profile
 def _find_combinations(node, correct, assignments, x_counter):
     p, q, r, s = assignments
@@ -185,7 +154,7 @@ def _find_combinations(node, correct, assignments, x_counter):
             continue
             
         # This is the most expensive operation - optimize the combine
-        batch_results = combine(left_list, right_list)
+        batch_results = combine_cython_ultra(left_list, right_list)
         all_res.extend(batch_results)
     
     return all_res, max_c
@@ -229,7 +198,7 @@ def get_model(input_size, output_size):
     model.apply(init_weights)  
     return model
 
-
+@lru_cache(maxsize=10000)
 @profile
 def compute_target(correct, input_row, nn_first_prediction, tree_candidate):
     """
@@ -454,6 +423,7 @@ if __name__ == "__main__":
     unfound_rows = []
     start_time = time.time()
     
+    # Pre-compute truth table once
     truth_table = np.array([
         [1, 1, 1, 1], [1, 1, 1, 0], [1, 1, 0, 1], [1, 1, 0, 0],
         [1, 0, 1, 1], [1, 0, 1, 0], [1, 0, 0, 1], [1, 0, 0, 0],
@@ -466,10 +436,10 @@ if __name__ == "__main__":
     percent_diffs = []           
     found_formulas = []
     # Sample fewer rows for faster execution during optimization 
-    row_indices = random.sample(range(len(all_rows)), 5)
+    row_indices = random.sample(range(len(all_rows)), 100)
     print(f"Testing with {len(row_indices)} random rows")
     
-    for row_index in range(300):
+    for row_index in row_indices:
         print(f"Processing row {row_index}...")
         row = all_rows[row_index]
         final_formula = row[formula_idx]
