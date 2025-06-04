@@ -442,7 +442,6 @@ if __name__ == "__main__":
     total_execution_time_main = time.time() - script_start_time_main
     print(f"\nSLURM Task {slurm_task_id}: Total script execution time: {total_execution_time_main:.2f} seconds.", flush=True)
     print(f"\n\n=== Summary for SLURM Task {slurm_task_id} (from {actual_rows_to_process_count_this_task} assigned rows) ===", flush=True)
-    # ... (rest of your summary print statements, deriving from aggregated lists or csv_output_rows)
     print(f"  Actual rows processed by this task's workers: {processed_count}", flush=True)
     print(f"  Rows with *any* formula found by this task: {found_solutions_count_aggregated}", flush=True)
     print(f"  Of those, exact minimals found by this task: {minimal_solutions_count_aggregated}", flush=True)
