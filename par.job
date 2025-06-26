@@ -1,0 +1,50 @@
+#!/bin/bash
+
+#SBATCH --job-name=run_nn_array_chunk
+#SBATCH --partition=genoa
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=24                
+#SBATCH --time=8:00:00          
+#SBATCH --array=0-24     
+
+# Config
+TOTAL_DB_ROWS=865062
+NUM_ARRAY_TASKS=25 
+
+
+CHUNK_SIZE=$((TOTAL_DB_ROWS / NUM_ARRAY_TASKS))
+REMAINDER=$((TOTAL_DB_ROWS % NUM_ARRAY_TASKS))
+
+export SLURM_ARRAY_TASK_ID
+
+ROW_START_INDEX=$((SLURM_ARRAY_TASK_ID * CHUNK_SIZE))
+
+# Adjust for remainder: first $REMAINDER tasks get one extra row
+if [ "$SLURM_ARRAY_TASK_ID" -lt "$REMAINDER" ]; then
+    ROW_START_INDEX=$((ROW_START_INDEX + SLURM_ARRAY_TASK_ID))
+    ACTUAL_CHUNK_SIZE=$((CHUNK_SIZE + 1))
+else
+    ROW_START_INDEX=$((ROW_START_INDEX + REMAINDER))
+    ACTUAL_CHUNK_SIZE=$CHUNK_SIZE
+fi
+
+ROW_END_INDEX=$((ROW_START_INDEX + ACTUAL_CHUNK_SIZE))
+
+export PY_ROW_START_INDEX=$ROW_START_INDEX
+export PY_ROW_COUNT=$ACTUAL_CHUNK_SIZE # Number of rows this task should process
+
+
+#SBATCH --output=nn_output_chunk_%A_%a.out
+#SBATCH --error=nn_error_chunk_%A_%a.err
+
+echo "Starting job $SLURM_JOB_ID, task $SLURM_ARRAY_TASK_ID"
+echo "Processing $PY_ROW_COUNT DB rows starting from index $PY_ROW_START_INDEX"
+
+# --- Run your Python script ---
+python mainr.py
+
+echo "----------------------------------------------------"
+echo "End time: $(date)"
+echo "Task $SLURM_ARRAY_TASK_ID finished."
+echo "----------------------------------------------------"
