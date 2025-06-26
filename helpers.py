@@ -1,94 +1,144 @@
 import torch
+from functools import lru_cache
 
-def find_allowable_combinations(tree, correct, assignments, x_counter=0):
-    p, q, r, s = assignments
-    
-    value_map = {'p': p, 'q': q, 'r': r, 's': s}
-    
-    # Pre-computed truth tables for common operations
-    truth_tables = {
-        'A': {  
-            1: [(1, 1)], 
-            0: [(0, 0), (0, 1), (1, 0)] 
-        },
-        'O': {  
-            1: [(1, 1), (1, 0), (0, 1)], 
-            0: [(0, 0)]  
-        },
-        'C': {  
-            1: [(0, 0), (0, 1), (1, 1)],  
-            0: [(1, 0)]  
-        },
-        'NC': {  
-            1: [(1, 0)],
-            0: [(0, 0), (0, 1), (1, 1)] 
-        },
-        'B': { 
-            1: [(1, 1), (0, 0)], 
-            0: [(1, 0), (0, 1)]
-        },
-        'X': {  
-            1: [(1, 0), (0, 1)],
-            0: [(1, 1), (0, 0)]
-        },
-        'NA': {  
-            1: [(0, 0), (0, 1), (1, 0)],
-            0: [(1, 1)]
-        },
-        'NOR': {
-            1: [(0, 0)], 
-            0: [(1, 1), (1, 0), (0, 1)] 
-        }
-    }
+class TreeNode:
+    def __init__(self, op, left=None, right=None):
+        self.op = op
+        self.left = left
+        self.right = right
+        self._hash = None
+
+    def __eq__(self, other):
+        if not isinstance(other, TreeNode):
+            return NotImplemented
+        return self.op == other.op and self.left == other.left and self.right == other.right
+
+    def __hash__(self):
+        if self._hash is None:
+            self._hash = hash((self.op, self.left, self.right))
+        return self._hash
+
+    def __repr__(self):
+        if self.left is None and self.right is None:
+            return f"TreeNode({self.op!r})"
+        return f"TreeNode({self.op!r}, left={self.left!r}, right={self.right!r})"
+
+TREENODE_CACHE = {} 
+def tuple_to_treenode(tree_repr):
+    if isinstance(tree_repr, TreeNode):
+        return tree_repr
+    if isinstance(tree_repr, str):
+        return TreeNode(tree_repr)
+    if isinstance(tree_repr, list): tree_repr = tuple(tree_repr)
+    elif isinstance(tree_repr, tuple):
+        tree_repr = tuple(tuple_to_treenode(arg) if isinstance(arg, (list, tuple, str)) and arg not in ['N', 'A', 'O', 'C', 'NC', 'B', 'X', 'NA', 'NOR'] else arg for arg in tree_repr)
 
 
-    # Extract operator and arguments
-    f, *args = tree
-    op = f
+    if tree_repr in TREENODE_CACHE:
+        return TREENODE_CACHE[tree_repr]
     
-    # First handle terminal cases (most common)
-    if op in ('p', 'q', 'r', 's'):
-        val = value_map[op]
-        return ([] if val != correct else [{}]), x_counter
-        
-    elif op == 'Z':
-        new_var = f"Z_{x_counter}"
-        return ([{new_var: correct}]), x_counter + 1
-        
-    # Handle NOT separately (common case)
-    elif op == 'N':
-        return find_allowable_combinations(args[0], 1 - correct, assignments, x_counter)
+    op = tree_repr[0] 
+    args = tree_repr[1:]
+
+    if op == 'N':
+        if not args: raise ValueError(f"Negation 'N' operator expects 1 argument, got 0 in {tree_repr}")
+        left_child = tuple_to_treenode(args[0])
+        result = TreeNode('N', left=left_child)
+    else: # Binary operators
+        if len(args) < 2: raise ValueError(f"Binary operator '{op}' expects 2 arguments, got {len(args)} in {tree_repr}")
+        left_child = tuple_to_treenode(args[0])
+        right_child = tuple_to_treenode(args[1])
+        result = TreeNode(op, left=left_child, right=right_child)
     
-    # Process binary operators more efficiently using truth tables
-    elif op in truth_tables:
-        valid_combinations = truth_tables[op][correct]
-        results = []
-        final_counter = x_counter
-        
-        for left_val, right_val in valid_combinations:
-            left_results, temp_counter = find_allowable_combinations(args[0], left_val, assignments, x_counter)
-            
-            # Skip if left side has no solutions
-            if not left_results:
-                final_counter = max(final_counter, temp_counter)
-                continue
-                
-            right_results, right_counter = find_allowable_combinations(args[1], right_val, assignments, temp_counter)
-            
-            # Skip if right side has no solutions
-            if not right_results:
-                final_counter = max(final_counter, right_counter)
-                continue
-                
-            # Combine valid solutions
-            combined = combine(left_results, right_results)
-            results.extend(combined)
-            final_counter = max(final_counter, right_counter)
-            
-        return results, final_counter
+    TREENODE_CACHE[tree_repr] = result
+    return result
+
+
+TRUTH_TABLES = {
+    'A': {1: [(1, 1)], 0: [(0, 0), (0, 1), (1, 0)]}, 'O': {1: [(1, 1), (1, 0), (0, 1)], 0: [(0, 0)]},
+    'C': {1: [(0, 0), (0, 1), (1, 1)], 0: [(1, 0)]}, 'NC': {1: [(1, 0)], 0: [(0, 0), (0, 1), (1, 1)]},
+    'B': {1: [(1, 1), (0, 0)], 0: [(1, 0), (0, 1)]}, 'X': {1: [(1, 0), (0, 1)], 0: [(1, 1), (0, 0)]},
+    'NA': {1: [(0, 0), (0, 1), (1, 0)], 0: [(1, 1)]}, 'NOR': {1: [(0, 0)], 0: [(1, 1), (1, 0), (0, 1)]}
+}
+
+def _find_combinations(node, correct_output, assignments, current_x_counter):
+    p_val, q_val, r_val, s_val = assignments
+    var_map = {'p': p_val, 'q': q_val, 'r': r_val, 's': s_val}
+    op = node.op
+    if op in var_map:
+        return ([{}] if var_map[op] == correct_output else []), current_x_counter
+    if op == 'Z':
+        return ([{current_x_counter: correct_output}]), current_x_counter + 1
+    if op == 'N':
+        return _find_combinations(node.left, 1 - correct_output, assignments, current_x_counter)
+    if node.left is None or node.right is None:
+        raise ValueError(f"Binary operator {op} node is missing children: {node}")
     
-    # Fallback case (should not reach here if all operators are handled)
-    return [], x_counter
+    if op not in TRUTH_TABLES: # Defensive check
+        raise ValueError(f"Operator '{op}' not found in TRUTH_TABLES for node {node}")
+    if correct_output not in TRUTH_TABLES[op]: # Defensive check
+        raise ValueError(f"Correct output '{correct_output}' not valid for operator '{op}' in TRUTH_TABLES for node {node}")
+        
+    possible_input_pairs = TRUTH_TABLES[op][correct_output]
+    all_combined_results = []
+    max_x_after_this_node = current_x_counter
+    for left_val, right_val in possible_input_pairs:
+        left_branch_options, x_after_left = _find_combinations(node.left, left_val, assignments, current_x_counter)
+        max_x_after_this_node = max(max_x_after_this_node, x_after_left)
+        if not left_branch_options: continue
+        right_branch_options, x_after_right = _find_combinations(node.right, right_val, assignments, x_after_left)
+        max_x_after_this_node = max(max_x_after_this_node, x_after_right)
+        if not right_branch_options: continue
+        combined_for_this_pair = combine(left_branch_options, right_branch_options)
+        all_combined_results.extend(combined_for_this_pair)
+    return all_combined_results, max_x_after_this_node
+
+@lru_cache(maxsize=1000)
+def find_allowable_combinations(tree_tuple_repr, correct_output, assignments_tuple, initial_x_counter=0):
+    node = tuple_to_treenode(tree_tuple_repr)
+    return _find_combinations(node, correct_output, assignments_tuple, initial_x_counter)
+
+
+def combine(l1, l2):
+    if not l1 or not l2:
+        return []
+    
+    # Ensure smaller list is inner loop
+    if len(l1) < len(l2):
+        shorter, longer = l1, l2
+        swap = False
+    else:
+        shorter, longer = l2, l1
+        swap = True
+    
+    # Pre-filter and convert to items for faster comparison
+    shorter_valid = []
+    for d in shorter:
+        if isinstance(d, dict):
+            shorter_valid.append((d, frozenset(d.items())))
+    
+    longer_valid = []
+    for d in longer:
+        if isinstance(d, dict):
+            longer_valid.append((d, frozenset(d.items())))
+    
+    if not shorter_valid or not longer_valid:
+        return []
+    
+    res = []
+    
+    for d_small, items_small in shorter_valid:
+        for d_large, items_large in longer_valid:
+            # Check compatibility using set intersection
+            if not (items_small & items_large - items_small):
+                # Compatible - merge dictionaries
+                if swap:
+                    merged = {**d_large, **d_small}
+                else:
+                    merged = {**d_small, **d_large}
+                res.append(merged)
+    
+    return res
  
 
 
@@ -100,10 +150,6 @@ def binary_to_bitlist(n, total):
     return [int(a) for a in f'{n:0{total}b}']
     
 def tree_to_formula(tree):
-    """
-    Recursively render a nested tuple/tree
-    into a string like "NA(q,s)" or "AND(p,OR(q,r))".
-    """
     if not isinstance(tree, tuple):
         return str(tree)
 
@@ -113,10 +159,6 @@ def tree_to_formula(tree):
 
 
 def extract_grammar_from_data_row(row, columns):
-    """
-    Build grammar from a row in the 'data' table.
-    Each rule returns a nested tuple.
-    """
     operator_names = {
         "A": "A",
         "O": "O",
@@ -141,7 +183,6 @@ def extract_grammar_from_data_row(row, columns):
 
 
 def count_non_terminals(expr):
-    """Recursively count the number of non-terminal symbols ('Z') in the expression."""
     if expr == "Z":
         return 1
     elif isinstance(expr, tuple):
@@ -149,11 +190,6 @@ def count_non_terminals(expr):
     return 0
 
 def expand_all_X(expr, grammar, max_non_terminals=8):
-    """
-    Recursively finds the leftmost 'Z' in a nested tuple structure and replaces it
-    with each possible grammar rule or terminal symbol. Grammar rules are only
-    applied if the resulting expression doesn't exceed the non-terminal threshold.
-    """
     if expr == "Z":
         expansions = []
 
@@ -161,7 +197,6 @@ def expand_all_X(expr, grammar, max_non_terminals=8):
         for terminal in ["p", "q", "r", "s"]:
             expansions.append(terminal)
 
-        # Try rule-based replacements, but only keep them if they don't exceed the limit
         for rule in grammar.values():
             new_expr = rule("Z")
             total_Zs = count_non_terminals(new_expr)
@@ -188,17 +223,6 @@ def expand_all_X(expr, grammar, max_non_terminals=8):
 
 
 def run_derivation_for_row(row_idx, row, columns, current = None):
-    """
-    Expands from the starting expression 'X' using grammar derived from the row.
-    This version performs a single iteration and returns the current expression
-    along with the options dictionary. An external function can use the options dict
-    to select the next node.
-
-    Returns:
-        current (str): The starting expression (or new node if already set).
-        current_options (dict): Dictionary of expansion options indexed by integers.
-    """
-    print(f"Using row {row_idx}: {row}")
     grammar = extract_grammar_from_data_row(row, columns)
     
     if current is None:
@@ -207,30 +231,19 @@ def run_derivation_for_row(row_idx, row, columns, current = None):
     # Get all possible expansions for the current expression
     expansions = expand_all_X(current, grammar)
     if not expansions:
-        print("No expansions available.")
         return current, {}
 
     # Build an options dictionary mapping indices to expansion expressions
     current_options = {i: exp for i, exp in enumerate(expansions)}
     
-    print(f"\nCurrent expression: {current}")
     #print(f"Options dict:\n  {current_options}")
 
     return current_options
 
 def evaluate_tree(tree, assignments):
-    """
-    Recursively evaluates a Boolean‐formula tree under the given assignments.
-    Supports:
-      - tuple nodes with ops: 'N','A','O','C','NC','B','X','NA','NOR'
-      - variable leaves: 'p','q','r','s'
-      - constant leaves: 'a' (True), 'b' (False)
-    Always returns 0 or 1, or raises ValueError on malformed input.
-    """
     # Debugging: Print tree and assignments at each call
     #print(f"Evaluating tree: {tree} with assignments: {assignments}")
 
-    # 1) Constant leaf (a = True, b = False)
     if isinstance(tree, (int, bool)):
         return int(tree)  # Directly return 1 or 0
     if isinstance(tree, str):
@@ -267,54 +280,43 @@ def evaluate_tree(tree, assignments):
         assert len(args) == 2
         return evaluate_tree(args[0], assignments) | evaluate_tree(args[1], assignments)
 
-    if op == 'C':  # A → B is ¬A ∨ B
+    if op == 'C':  
         assert len(args) == 2
         left = evaluate_tree(args[0], assignments)
         right = evaluate_tree(args[1], assignments)
         return 0 if (left == 1 and right == 0) else 1
 
-    if op == 'NC':  # A ↛ B
+    if op == 'NC': 
         assert len(args) == 2
         left = evaluate_tree(args[0], assignments)
         right = evaluate_tree(args[1], assignments)
         return 1 if (left == 1 and right == 0) else 0
 
-    if op == 'B':  # A ↔ B
+    if op == 'B':  
         assert len(args) == 2
         return int(evaluate_tree(args[0], assignments) == evaluate_tree(args[1], assignments))
 
-    if op == 'X':  # A ↮ B
+    if op == 'X':  
         assert len(args) == 2
         return int(evaluate_tree(args[0], assignments) != evaluate_tree(args[1], assignments))
 
-    if op == 'NA':  # ¬(A ∧ B)
+    if op == 'NA': 
         assert len(args) == 2
         return 1 - (evaluate_tree(args[0], assignments) & evaluate_tree(args[1], assignments))
 
-    if op == 'NOR':  # ¬(A ∨ B)
+    if op == 'NOR':  
         assert len(args) == 2
         return 1 - (evaluate_tree(args[0], assignments) | evaluate_tree(args[1], assignments))
 
-    # 4) Invalid operator or malformed node
     raise ValueError(f"Unknown operator or malformed node: {op!r}")
 
 
     
     
 def check_tree_matches(tree, target, assignments):
-    """
-    Returns True if evaluating `tree` under `assignments` yields `target`, else False.
-    - tree: partial Boolean‐formula tree.
-    - target: 0 or 1, the boolean you want to check against.
-    - assignments: tuple (p,q,r,s).
-    """
     val = evaluate_tree(tree, assignments)
     return bool(val == target)
 def percent_longer(found: str, minimal: str) -> float:
-    """
-    Returns how much longer `found` is than `minimal`, 
-    as a percentage of `minimal`’s length.
-    """
     return (len(found) - len(minimal)) / len(minimal) * 100
 
 

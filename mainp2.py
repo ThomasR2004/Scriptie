@@ -11,7 +11,7 @@ import os
 from functools import lru_cache
 from collections import defaultdict
 import concurrent.futures
-import multiprocessing as mp 
+import multiprocessing as mp
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from helpers import (round_prediction, binary_to_bitlist,
@@ -21,7 +21,7 @@ check_tree_matches, percent_longer, find_allowable_combinations)
 
 
 
-device = torch.device("cpu") 
+device = torch.device("cpu")
 print(f"Using device: {device}", flush=True)
 
 
@@ -46,17 +46,16 @@ def init_weights(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
 
-MODEL_CACHE = {} 
+MODEL_CACHE = {}
 def get_model(input_size, output_size):
     cache_key = (input_size, output_size)
     if cache_key not in MODEL_CACHE:
-        model = Net(input_size, output_size).to(device) 
+        model = Net(input_size, output_size).to(device)
         MODEL_CACHE[cache_key] = model
     model = MODEL_CACHE[cache_key]
     model.apply(init_weights)
     return model
 
-@lru_cache(maxsize=10000)
 def compute_target(correct_val, input_row_tuple, nn_initial_prediction_tensor, tree_candidate_tuple_repr):
     assignments_tuple = tuple(input_row_tuple)
 
@@ -106,28 +105,28 @@ def train_on_truth_table(truth_table_np, bitlist_target, tree_candidate_tuple_re
     X_tensor = torch.from_numpy(truth_table_np.astype(np.float32)).to(device)
     N_rows, input_feature_size = X_tensor.size()
 
-    target_info_list = [] 
+    target_info_list = []
     D_values_for_rows = []
-    
-    dummy_nn_prediction = torch.empty(0, device=device) 
+
+    dummy_nn_prediction = torch.empty(0, device=device)
 
     for i in range(N_rows):
         input_row_tuple = tuple(truth_table_np[i])
-        target_vector_i, D_i = compute_target(bitlist_target[i], input_row_tuple, 
+        target_vector_i, D_i = compute_target(bitlist_target[i], input_row_tuple,
                                               dummy_nn_prediction, tree_candidate_tuple_repr)
-        if target_vector_i is None: 
-            return None 
+        if target_vector_i is None:
+            return None
         target_info_list.append((target_vector_i, D_i))
         D_values_for_rows.append(D_i)
 
-    if not D_values_for_rows: 
-        return 0 
+    if not D_values_for_rows:
+        return 0
 
     global_D = max(D_values_for_rows) if D_values_for_rows else 0
-    if global_D == 0: 
-        return 0 
+    if global_D == 0:
+        return 0
 
-    model = get_model(input_feature_size, global_D) 
+    model = get_model(input_feature_size, global_D)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4, amsgrad=True)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.3, patience=max(1, patience // 3), min_lr=1e-6
@@ -136,13 +135,13 @@ def train_on_truth_table(truth_table_np, bitlist_target, tree_candidate_tuple_re
     Y_target_matrix = torch.zeros(N_rows, global_D, device=device)
     for i, (target_vector_i, D_i) in enumerate(target_info_list):
         if D_i > 0 and target_vector_i is not None: # Ensure target_vector_i is not None
-            len_to_copy = min(D_i, global_D, target_vector_i.numel()) # Add target_vector_i.numel()
+            len_to_copy = min(D_i, global_D, target_vector_i.numel())
             Y_target_matrix[i, :len_to_copy] = target_vector_i[:len_to_copy]
 
     best_loss_val = float('inf')
     patience_counter = 0
-    convergence_check_freq = 5 
-    loss_convergence_threshold = 1e-5 
+    convergence_check_freq = 5
+    loss_convergence_threshold = 1e-5
 
     for epoch in range(1, max_epochs + 1):
         model.train()
@@ -152,45 +151,45 @@ def train_on_truth_table(truth_table_np, bitlist_target, tree_candidate_tuple_re
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
-        
-        current_loss_val = loss.item()
-        scheduler.step(current_loss_val) 
 
-        if epoch % convergence_check_freq == 0 or current_loss_val < 0.001: 
+        current_loss_val = loss.item()
+        scheduler.step(current_loss_val)
+
+        if epoch % convergence_check_freq == 0 or current_loss_val < 0.001:
             model.eval()
             with torch.no_grad():
-                rounded_preds = round_prediction(predictions) 
-            model.train() 
+                rounded_preds = round_prediction(predictions)
+            model.train()
             if torch.equal(rounded_preds, round_prediction(Y_target_matrix)):
-                return epoch 
+                return epoch
 
-        if current_loss_val < best_loss_val - 1e-5: 
+        if current_loss_val < best_loss_val - 1e-5:
             best_loss_val = current_loss_val
             patience_counter = 0
         else:
             patience_counter += 1
-            if patience_counter >= patience and epoch > 50: 
+            if patience_counter >= patience and epoch > 50:
                 model.eval()
                 with torch.no_grad():
                     rounded_preds_final = round_prediction(model(X_tensor))
                 if torch.equal(rounded_preds_final, round_prediction(Y_target_matrix)):
                     return epoch
-                return float('inf') 
+                return float('inf')
 
-        if current_loss_val < loss_convergence_threshold: 
+        if current_loss_val < loss_convergence_threshold:
             model.eval()
             with torch.no_grad():
                 rounded_preds_loss_thresh = round_prediction(model(X_tensor))
             if torch.equal(rounded_preds_loss_thresh, round_prediction(Y_target_matrix)):
                 return epoch
-            
+
     model.eval()
     with torch.no_grad():
         rounded_preds_max_epoch = round_prediction(model(X_tensor))
     if torch.equal(rounded_preds_max_epoch, round_prediction(Y_target_matrix)):
-        return max_epochs 
-        
-    return float('inf') 
+        return max_epochs
+
+    return float('inf')
 
 def evaluate_candidate_options(current_options_dict, truth_table_np, final_formula_str, bitlist_target):
     candidate_iterations_map = {}
@@ -203,7 +202,7 @@ def evaluate_candidate_options(current_options_dict, truth_table_np, final_formu
                 if not check_tree_matches(tree_cand_tuple_repr, bitlist_target[i], tuple(truth_table_row_np)):
                     all_rows_match = False; break
             if all_rows_match: return cand_formula_str # It's a non-Z solution
-    
+
     # If no direct match or non-Z solution found yet, evaluate Z-containing candidates
     for idx, tree_cand_tuple_repr in current_options_dict.items():
         if 'Z' not in tree_to_formula(tree_cand_tuple_repr): continue # Already checked non-Z or it's the target
@@ -214,28 +213,28 @@ def evaluate_candidate_options(current_options_dict, truth_table_np, final_formu
             tree_cand_tuple_repr, bitlist_target[0], first_row_assignments_tuple)
 
         if not initial_candidate_list and num_Z_vars > 0: # Not solvable for first row
-            continue 
+            continue
 
         iterations_to_converge = train_on_truth_table(truth_table_np, bitlist_target, tree_cand_tuple_repr)
         if iterations_to_converge is not None and iterations_to_converge != float('inf'):
             candidate_iterations_map[idx] = iterations_to_converge
-            
+
     return candidate_iterations_map
 
 
 # Function to be executed by each worker process
 def process_single_db_row(args_tuple):
-    (row_db_idx, db_row_data_tuple, column_names_list, 
-     truth_table_np_shared, formula_idx_main, category_idx_main, 
+    (row_db_idx, db_row_data_tuple, column_names_list,
+     truth_table_np_shared, formula_idx_main, category_idx_main,
      derivation_timeout_seconds, torch_num_threads) = args_tuple
 
     if torch_num_threads:
         torch.set_num_threads(torch_num_threads)
 
-    db_row_data = db_row_data_tuple 
+    db_row_data = db_row_data_tuple
     target_minimal_formula_str = db_row_data[formula_idx_main]
     bitlist_target = binary_to_bitlist(db_row_data[category_idx_main], len(truth_table_np_shared))
-    
+
     first_row_correct_output = bitlist_target[0]
     first_row_assignments_tuple = tuple(truth_table_np_shared[0])
 
@@ -243,26 +242,28 @@ def process_single_db_row(args_tuple):
     solution_found_for_row = False
     found_formula_str_result = None
     length_percent_diff_result = None
+    depth_found_at = None
     max_depth = int(os.environ.get("MAX_SEARCH_DEPTH", "250"))
 
 
     for depth in range(max_depth):
         options_from_derivation = run_derivation_for_row(row_db_idx, db_row_data, column_names_list, current_tree_candidate_tuple)
-        
+
         if not options_from_derivation:
             break
 
         derivation_eval_start_time = time.time()
-        eval_result = evaluate_candidate_options(options_from_derivation, truth_table_np_shared, 
+        eval_result = evaluate_candidate_options(options_from_derivation, truth_table_np_shared,
                                                  target_minimal_formula_str, bitlist_target)
         derivation_eval_duration = time.time() - derivation_eval_start_time
-        
+
         if derivation_eval_duration > derivation_timeout_seconds and depth > 0 :
             break
 
         if isinstance(eval_result, str):
             solution_found_for_row = True
             found_formula_str_result = eval_result
+            depth_found_at = depth
             if found_formula_str_result == target_minimal_formula_str:
                 length_percent_diff_result = 0.0
             else:
@@ -273,9 +274,8 @@ def process_single_db_row(args_tuple):
             chosen_next_candidate = False
             for option_idx, nn_iters in sorted_candidates_by_iters:
                 potential_next_tree_tuple = options_from_derivation[option_idx]
-                # Check viability for the first row (as a quick filter)
                 allowable_combs, _ = find_allowable_combinations(
-                    potential_next_tree_tuple, first_row_correct_output,                 
+                    potential_next_tree_tuple, first_row_correct_output,
                     first_row_assignments_tuple, initial_x_counter=0)
                 if allowable_combs: # If it's possible to satisfy the first row
                     current_tree_candidate_tuple = potential_next_tree_tuple
@@ -283,13 +283,13 @@ def process_single_db_row(args_tuple):
                     break
             if not chosen_next_candidate:
                 break
-        else: 
+        else:
             break
-    
+
     if solution_found_for_row:
-        return "found", row_db_idx, found_formula_str_result, length_percent_diff_result
+        return "found", row_db_idx, found_formula_str_result, length_percent_diff_result, depth_found_at
     else:
-        return "unfound", row_db_idx, target_minimal_formula_str, None
+        return "unfound", row_db_idx, target_minimal_formula_str, None, None
 
 
 if __name__ == "__main__":
@@ -299,15 +299,15 @@ if __name__ == "__main__":
     # --- SLURM Array Task Configuration ---
     py_row_start_index_str = os.environ.get("PY_ROW_START_INDEX")
     py_row_count_str = os.environ.get("PY_ROW_COUNT")
-    
+
     # Get SLURM identifiers for unique file naming
-    slurm_array_job_id = os.environ.get("SLURM_ARRAY_JOB_ID", "localjob") # ID of the whole array
-    slurm_task_id = os.environ.get("SLURM_ARRAY_TASK_ID", "task0")       # ID of this specific task
+    slurm_array_job_id = os.environ.get("SLURM_ARRAY_JOB_ID", "localjob") 
+    slurm_task_id = os.environ.get("SLURM_ARRAY_TASK_ID", "task0")
 
     py_row_start_index = int(py_row_start_index_str)
     py_row_count = int(py_row_count_str)
     print(f"SLURM Task {slurm_task_id}: Received PY_ROW_START_INDEX={py_row_start_index}, PY_ROW_COUNT={py_row_count}", flush=True)
- 
+
 
     # --- Database Connection and Data Loading ---
     DB_NAME = "sample.db"
@@ -340,13 +340,17 @@ if __name__ == "__main__":
     # --- Determine rows for THIS SPECIFIC SLURM TASK ---
     py_row_end_index = min(py_row_start_index + py_row_count, total_db_rows_actual)
     rows_for_this_task_data = [] # Will store (original_db_idx, data_tuple)
-    
+
     if py_row_start_index < total_db_rows_actual and py_row_count > 0:
         for i in range(py_row_start_index, py_row_end_index):
             rows_for_this_task_data.append({'original_db_idx': i, 'data': all_rows_data_main[i]})
-    
+
     actual_rows_to_process_count_this_task = len(rows_for_this_task_data)
-    print(f"SLURM Task {slurm_task_id}: Processing {actual_rows_to_process_count_this_task} DB rows. Original indices: {rows_for_this_task_data[0]['original_db_idx']} to {rows_for_this_task_data[-1]['original_db_idx']}", flush=True)
+    if actual_rows_to_process_count_this_task > 0:
+        print(f"SLURM Task {slurm_task_id}: Processing {actual_rows_to_process_count_this_task} DB rows. Original indices: {rows_for_this_task_data[0]['original_db_idx']} to {rows_for_this_task_data[-1]['original_db_idx']}", flush=True)
+    else:
+        print(f"SLURM Task {slurm_task_id}: No rows to process for this task.", flush=True)
+
 
     num_workers = 24
     print(f"SLURM Task {slurm_task_id}: Using {num_workers} workers for its {actual_rows_to_process_count_this_task} rows.", flush=True)
@@ -361,13 +365,9 @@ if __name__ == "__main__":
              derivation_timeout_main, torch_threads_per_worker)
         )
 
-    # --- Store results including original data for CSV ---
-    # Each item will be a dictionary representing a row for the CSV
     csv_output_rows = []
 
-
-    # --- Aggregation lists (for console summary) ---
-    unfound_rows_aggregated = [] # Stores (db_idx, target_minimal_formula_str)
+    unfound_rows_aggregated = []
     percent_length_differences_aggregated = []
     found_solutions_count_aggregated = 0
     minimal_solutions_count_aggregated = 0
@@ -381,22 +381,25 @@ if __name__ == "__main__":
 
             for future in concurrent.futures.as_completed(future_to_task_args):
                 task_args = future_to_task_args[future]
-                original_db_idx = task_args[0] # Original DB index from the input args
-                original_row_tuple_data = task_args[1] # Original row data tuple
+                original_db_idx = task_args[0]
+                original_row_tuple_data = task_args[1] 
 
-                # Prepare data for CSV: start with original columns
+                # Prepare data for CSV
                 row_for_csv = {col_name: original_row_tuple_data[i] for i, col_name in enumerate(all_column_names_main)}
-                row_for_csv['original_db_idx_processed'] = original_db_idx # Add for clarity/sorting later
-                row_for_csv['script_found_formula'] = None # Initialize new columns
+                row_for_csv['original_db_idx_processed'] = original_db_idx
+                row_for_csv['script_found_formula'] = None
                 row_for_csv['script_overlength_percent'] = None
+                row_for_csv['depth_found'] = None
 
-                status, _, data1, data2 = future.result() # original_row_idx from result can be ignored if we use task_args[0]
-                
+                # MODIFIED: Unpack depth from result
+                status, _, data1, data2, found_at_depth = future.result()
+
                 if status == "found":
                     found_formula_str = data1
                     length_pct_diff = data2
                     row_for_csv['script_found_formula'] = found_formula_str
                     row_for_csv['script_overlength_percent'] = length_pct_diff
+                    row_for_csv['depth_found'] = found_at_depth
 
                     found_solutions_count_aggregated += 1
                     percent_length_differences_aggregated.append(length_pct_diff)
@@ -405,9 +408,8 @@ if __name__ == "__main__":
                 elif status == "unfound":
                     target_minimal_formula = data1
                     unfound_rows_aggregated.append((original_db_idx, target_minimal_formula))
-                        # script_found_formula and script_overlength_percent remain None
 
-                
+
                 csv_output_rows.append(row_for_csv)
                 processed_count += 1
                 if processed_count % (max(1, len(tasks_args_list) // 10)) == 0 or processed_count == len(tasks_args_list):
@@ -415,23 +417,21 @@ if __name__ == "__main__":
     else:
         print(f"SLURM Task {slurm_task_id}: No tasks to process.", flush=True)
 
-    # Sort CSV output rows by original database index for consistent output
     csv_output_rows.sort(key=lambda x: x['original_db_idx_processed'])
 
 
-    # --- Write results of THIS TASK to its own CSV file ---
     if csv_output_rows:
         output_dir = "task_results" # Subdirectory for individual task CSVs
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # Filename: results_arrayJOBID_taskTASKID.csv
         csv_filename = os.path.join(output_dir, f"results_{slurm_array_job_id}_task_{slurm_task_id}.csv")
-        
-        fieldnames = all_column_names_main + ['script_found_formula', 'script_overlength_percent']
+
+        fieldnames = all_column_names_main + ['script_found_formula', 'script_overlength_percent', 'depth_found']
 
         print(f"SLURM Task {slurm_task_id}: Writing {len(csv_output_rows)} rows to {csv_filename}", flush=True)
         with open(csv_filename, 'w', newline='') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore') # ignore extra keys in dict not in fieldnames
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             for row_dict in csv_output_rows:
                 writer.writerow(row_dict)
@@ -445,30 +445,30 @@ if __name__ == "__main__":
     print(f"  Actual rows processed by this task's workers: {processed_count}", flush=True)
     print(f"  Rows with *any* formula found by this task: {found_solutions_count_aggregated}", flush=True)
     print(f"  Of those, exact minimals found by this task: {minimal_solutions_count_aggregated}", flush=True)
-    
+
     if percent_length_differences_aggregated:
         avg_pct_len_diff = sum(percent_length_differences_aggregated) / len(percent_length_differences_aggregated)
         print(f"  Avg %-overlength (this task): {avg_pct_len_diff:.1f}%", flush=True)
 
     print(f"\n--- Found Formula Details (SLURM Task {slurm_task_id}) ---", flush=True)
-    # Reconstruct found_formulas_details_aggregated from csv_output_rows for printing
     found_formulas_details_print = []
     for row in csv_output_rows:
         if row.get("script_found_formula") and row.get("script_found_formula") not in [None, "ERROR_IN_PROCESSING"]:
             found_formulas_details_print.append(
-                (row['original_db_idx_processed'], row["script_found_formula"], row["script_overlength_percent"])
+                (row['original_db_idx_processed'], row["script_found_formula"], row["script_overlength_percent"], row.get('depth_found'))
             )
-    found_formulas_details_print.sort() # Sort by original_db_idx
-    for db_idx, formula_str, pct_diff in found_formulas_details_print:
-        print(f"  DB Row {db_idx}: {formula_str!r} ({pct_diff:+.1f}%)", flush=True)
-    
+    found_formulas_details_print.sort()
+    for db_idx, formula_str, pct_diff, depth_val in found_formulas_details_print:
+        depth_str = f"depth {depth_val}" if depth_val is not None else "depth N/A"
+        print(f"  DB Row {db_idx}: {formula_str!r} ({pct_diff:+.1f}%, {depth_str})", flush=True)
+
     if unfound_rows_aggregated:
         print(f"\n--- Rows Not Found or Errored (SLURM Task {slurm_task_id}, {len(unfound_rows_aggregated)}) ---", flush=True)
-        unfound_rows_aggregated.sort() # Sort by db_idx
+        unfound_rows_aggregated.sort()
         for db_idx, status_or_formula in unfound_rows_aggregated:
             if status_or_formula == "ERROR_IN_PROCESSING":
                  print(f"  DB Row {db_idx}: ERRORED DURING PROCESSING", flush=True)
-            else: # It's the target_minimal_formula
+            else: 
                  print(f"  DB Row {db_idx}: Minimal formula was {status_or_formula!r}", flush=True)
 
     print(f"SLURM Task {slurm_task_id} finished.", flush=True)
